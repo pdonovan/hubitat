@@ -20,12 +20,11 @@
  *    2020-01-04  Simon Burke    Started adding Thermostat capability
  *    2020-02-09  Simon Burke    Thermostat capability and refreshing of state from MELCloud appear to be working
  *                               Starting work on splitting into Parent / Child Driver
- *    2020-02-16  Simon Burke    Adjusted code to use new parent driver logging, i.e. Debug, Info and Error Logging methods
- *                               Ensured all attributes were setup when device is created
- *                               Called the on() method in various other commands, ensuring the unit is turned on first
- *                               Various minor code refinements
+ *
  * 
  */
+import java.text.DecimalFormat;
+
 metadata {
 	definition (name: "MELCloud AC Unit", namespace: "simnet", author: "Simon Burke") {
         capability "Refresh"
@@ -87,8 +86,10 @@ metadata {
 
 def refresh() {
   // Retrieve current state information from MEL Cloud Service   
-  getRooms()
-  initialize()
+  //getRooms()
+  //initialize()
+    parent.infoLog("refresh unit ${device.currentValue("unitId", true)}");
+    unitCommand();
 }
 
 def initialize() {
@@ -104,10 +105,29 @@ def initialize() {
     
 }
 
+def getFanModeMap() {
+    [
+        0:"auto",
+        1:"low",
+        2:"low-medium",
+        3:"medium",
+        5:"medium-high",
+        6:"high"
+    ]
+}
 
+def getModeMap() {
+    [
+        1:"heat",
+        2:"dry",
+        3:"cool",
+        7:"fan",
+        8:"auto"
+    ]
+}
 
 def getRooms() {
-    //retrieves current status information for the ac unit
+    //retrieves current stat information for the ac unit
     
     def vUnitId = ""
     def vRoom = ""
@@ -136,44 +156,24 @@ def getRooms() {
             parent.debugLog("GetRooms: Initial data returned from rooms.aspx: ${resp.data}") 
             resp?.data?.each { building -> // Each Building
                                 building?.units?.each // Each AC Unit / Room
-                                  { acUnit ->
-                                      vModeDesc = ""
-                                      vRoom     = acUnit.room
-                                      vUnitId   = acUnit.unitid
-                                      vPower    = acUnit.power
-                                      vMode     = acUnit.mode
-                                      vTemp     = acUnit.temp
-                                      vSetTemp  = acUnit.settemp
-                                      
-                                      if ("${vUnitId}" == "${device.currentValue("unitId")}") {
-                                          
-                                          if (vPower == "q") {vModeDesc = "off"}
-                                          else {
-                                              if (vMode == "1") {vModeDesc = "heat" }
-                                              if (vMode == "2") {vModeDesc = "dry" }
-                                              if (vMode == "3") {vModeDesc = "cool" }
-                                              if (vMode == "7") {vModeDesc = "fan" }
-                                              if (vMode == "8") {vModeDesc = "auto" }
-                                          }
-    
-                                          sendEvent(name: "temperature", value: "${vTemp}")
-                                          sendEvent(name: "thermostatOperatingState", value: "${vModeDesc}")
-                                          sendEvent(name: "thermostatMode", value: "${vModeDesc}")
-                                          
-                                          if (  "${vModeDesc}" == "cool"
-                                             || "${vModeDesc}" == "dry"
-                                             || "${vModeDesc}" == "auto")
-                                            { setCoolingSetpoint(vSetTemp) }
-
-                                          if (   "${vModeDesc}" == "heat"
-                                               ||"${vModeDesc}" == "auto")
-                                            { setHeatingSetpoint(vSetTemp) }
-
-                                          sendEvent(name: "lastRunningMode", value: "${vModeDesc}")
-                                          parent.debugLog("GetRooms: Interpretted results - ${vRoom}(${vUnitId}) - Power: ${vPower}, Mode: ${vModeDesc}(${vMode}), Temp: ${vTemp}, Set Temp: ${vSetTemp}" ) 
-                                      } 
-                                  } 
-                }
+								{ acUnit -> 
+									vRoom     = acUnit.room
+									vUnitId   = acUnit.unitid
+									vPower    = acUnit.power
+									vMode     = acUnit.mode
+									vTemp     = acUnit.temp
+									vSetTemp  = acUnit.settemp
+									parent.debugLog("updating ${vUnitId}")  
+									def statusInfo = [:]
+									statusInfo.unitid = acUnit.unitid
+									statusInfo.power = acUnit.power
+									statusInfo.setmode = acUnit.mode.toInteger()
+									statusInfo.settemp = acUnit.settemp
+									statusInfo.roomtemp = acUnit.temp
+									log.debug("${vRoom}(${vUnitId}): ${statusInfo}")
+									applyResponseStatus(statusInfo)
+								} 
+                			}
             }
     }   
 	catch (Exception e) {
@@ -185,7 +185,12 @@ def unitCommand(command) {
     // Re-usable method that submits a command to the MEL Cloud Service, based on the command text passed in
     // See https://github.com/NovaGL/diy-melview for more details on commands and this API more generally
  
-    def bodyJson = "{ \"unitid\": \"${device.currentValue("unitId", true)}\", \"v\": 2, \"commands\": \"${command}\", \"lc\": 1 }"
+    def bodyJson
+    if (command != null) {
+        bodyJson = "{ \"unitid\": \"${device.currentValue("unitId", true)}\", \"v\": 2, \"commands\": \"${command}\", \"lc\": 1 }"
+    } else {
+        bodyJson = "{ \"unitid\": \"${device.currentValue("unitId", true)}\", \"v\": 2 }"
+    }
     def headers = [:] 
 
     headers.put("Content-Type", "application/json")
@@ -197,16 +202,82 @@ def unitCommand(command) {
         contentType: "application/json",
         body : bodyJson
 	]
-    parent.debugLog("${bodyJson}, ${headers.Cookie}")       
+    debugLog("will post: ${bodyJson}") //, ${headers.Cookie}")       
 	try {
-        
-        httpPost(postParams) { resp -> parent.debugLog("UnitCommand (${command}): Response - ${resp.data}") }
+        def statusInfo = [:]
+        httpPost(postParams) { resp ->
+            debugLog("UnitCommand (${command}) got response - ${resp.data}")
+            if (resp?.data?.error == "ok") {
+                def unit = resp.data
+                statusInfo.unitid = unit.id
+                statusInfo.power = unit.power
+                statusInfo.setmode = unit.setmode
+                statusInfo.settemp = unit.settemp
+                statusInfo.roomtemp = unit.roomtemp
+                statusInfo.setfan = unit.setfan
+                debugLog(statusInfo)
+                applyResponseStatus(statusInfo)
+            } else {
+                parent.errorLog("UnitCommand (${command}): Error from Mitsubishi Electric cloud: ${resp?.data?.error?.fault}")
+            }
+        }
     }
 	catch (Exception e) {
         parent.errorLog("UnitCommand (${command}): Unable to query Mitsubishi Electric cloud: ${e}")
 	}
 }
 
+def applyResponseStatus(statusInfo) {
+    debugLog("applyResponseStatus: incoming mode: ${statusInfo.setmode}")
+    def vModeDesc = ""
+    if (statusInfo.power == "q" || statusInfo.power == 0) {vModeDesc = "off"}
+    else {
+        vModeDesc = modeMap[statusInfo.setmode]
+    }
+    //log.debug(modeMap[8])
+    debugLog("parsed mode: ${vModeDesc}")
+    
+    def tempscaleUnit = "°${location.temperatureScale}"
+    def roomtempValue = convertTemperatureIfNeeded(statusInfo.roomtemp.toFloat(),"c",1)
+    
+    sendEvent(name: "temperature", value: roomtempValue, unit: tempscaleUnit)
+    sendEvent(name: "thermostatMode", value: "${vModeDesc}")
+    
+    def operatingState
+    if (vModeDesc == "off") {
+        operatingState = "idle"
+    } else if (vModeDesc == "heat") {
+        operatingState = "heating"
+    } else if (vModeDesc == "cool") {
+        operatingState = "cooling"
+    } else if (vModeDesc == "auto") {
+        operatingState = "cooling"
+    }
+    
+    log.debug("operatingState: ${operatingState}")
+    if (operatingState != null) {
+        sendEvent(name: "thermostatOperatingState", value: operatingState)
+        if (operatingState != "idle") {
+            sendEvent(name: "lastRunningMode", value: "${vModeDesc}")
+        }
+    }
+
+
+
+    debugLog("checking settemp: ${statusInfo.settemp}")
+    
+    def setTemp = statusInfo.settemp
+    def setTempValue = convertTemperatureIfNeeded(statusInfo.settemp.toFloat(),"c",1)
+    sendEvent(name: "coolingSetpoint" , value: setTempValue, unit: tempscaleUnit)
+    sendEvent(name: "heatingSetpoint" , value: setTempValue, unit: tempscaleUnit)
+    sendEvent(name: "thermostatSetpoint" , value: setTempValue, unit: tempscaleUnit)
+    
+    debugLog("checking setfan: ${statusInfo.setfan}")
+    if (statusInfo.setfan != null) {
+        def fanMode = fanModeMap[statusInfo.setfan]
+        sendEvent(name: "thermostatFanMode" , value: fanMode)
+    }
+}
 
 //Unsupported commands from Thermostat capability
 def emergencyHeat() { parent.debugLog("Emergency Heat Command not supported by MELCloud") }
@@ -236,25 +307,22 @@ def setSchedule(JSON_OBJECT) {parent.debugLog("setSchedule not currently support
 
 
 def setCoolingSetpoint(temperature) {
-
-    sendEvent(name: "coolingSetpoint", value : temperature)
+    def temperatureValue = convertTemperatureIfNeeded(temperature.toFloat(),"c",1)
+    sendEvent(name: "coolingSetpoint", value : temperatureValue, unit: "°${location.temperatureScale}")
     parent.infoLog("${device.label} - Cooling Set Point adjusted to ${temperature}")
-    if (device.currentValue("thermostatOperatingState") == 'cool') {
-        setTemperature(temperature.toDecimal())
-    }
+    def setTemp = setTemperatureCommand(temperature)
 }
 
 def setHeatingSetpoint(temperature) {
-
-    sendEvent(name: "heatingSetpoint", value : temperature)
+    def temperatureValue = convertTemperatureIfNeeded(temperature.toFloat(),"c",1)
+    sendEvent(name: "heatingSetpoint", value : temperatureValue, unit: "°${location.temperatureScale}")
     parent.infoLog("${device.label} - Heating Set Point adjusted to ${temperature}")
-    if (device.currentValue("thermostatOperatingState") == 'heat') {
-        setTemperature(temperature.toDecimal())
-    }
+    def setTemp = setTemperatureCommand(temperature)
 }
 
 def setThermostatFanMode(fanmode) {
     
+    debugLog("setThermostatFanMode: Fan Mode set to ${fanmode}")
     sendEvent(name: "thermostatFanMode", value : fanmode)
     parent.infoLog("${device.label} - Fan Mode set to ${fanmode}")
 }
@@ -273,18 +341,32 @@ def setThermostatMode(thermostatmodeX) {
         if (thermostatmodeX == 'heat') { heat() }
         if (thermostatmodeX == 'auto') { auto() }
         if (thermostatmodeX == 'fan') { fanOn() }
+        if (thermostatmodeX == 'off') { off() }
     }
 }
 
 
 def setTemperature(temperature) {
-    parent.debugLog("setTemperature: Adjusting Temperature to ${temperature}")
+    debugLog("setTemperature: ${temperature}")
+    def tempSet = setTemperatureCommand(temperature)
     
-    unitCommand("TS${temperature}")
-    sendEvent(name: "thermostatSetPoint", value: temperature.toDecimal())
-    parent.infoLog("${device.label} - Temperature adjusted to ${temperature}")
+    sendEvent(name: "thermostatSetpoint", value: tempSet, unit: "°${location.temperatureScale}")
+}
+
+def setTemperatureCommand(temperature) {
+    debugLog("setTemperatureCommand: '${temperature}'")   
     
+    if (temperature == null) {
+        return;
+    }
+    DecimalFormat tf = new DecimalFormat ("##.0");
+    def tempParam = tf.format(temperature);
+
+    debugLog("setTemperatureCommand: will request ${tempParam}")        
     
+    unitCommand("TS${tempParam}")
+     
+    return tempParam
 }
 
 
@@ -321,7 +403,11 @@ def fanOn() {
 def cool() {
     on()
     unitCommand("MD3")
-    setTemperature(device.currentValue("coolingSetpoint"))
+    if (device.currentValue("coolingSetpoint") != null) {
+        setTemperature(device.currentValue("coolingSetpoint"))
+    } else {
+        // rely on response parsing setting status of the setpoints so user will see what it's currently set to
+    }
 }
 
 def dry() {
@@ -332,10 +418,27 @@ def dry() {
 def heat() {
     on()
     unitCommand("MD1")
-    setTemperature(device.currentValue("heatingSetpoint"))
+    if (device.currentValue("heatingSetpoint") != null) {
+        setTemperature(device.currentValue("heatingSetpoint"))
+    } else {
+        // rely on response parsing setting status of the setpoints so user will see what it's currently set to
+    }
 }
 
+def debugLog(debugMessage) {
+	//if (parent.DebugLogging == true)
+    log.debug(debugMessage)	
+}
 
+def errorLog(errorMessage) {
+    //if (parent.ErrorLogging == true)
+    log.error(errorMessage)
+}
 
+def infoLog(infoMessage) {
+    //if(parent.InfoLogging == true)
+    log.info(infoMessage)  
+}
+ 
 
 
