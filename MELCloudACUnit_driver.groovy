@@ -20,6 +20,10 @@
  *    2020-01-04  Simon Burke    Started adding Thermostat capability
  *    2020-02-09  Simon Burke    Thermostat capability and refreshing of state from MELCloud appear to be working
  *                               Starting work on splitting into Parent / Child Driver
+ *    2020-02-16  Simon Burke    Adjusted code to use new parent driver logging, i.e. Debug, Info and Error Logging methods
+ *                               Ensured all attributes were setup when device is created
+ *                               Called the on() method in various other commands, ensuring the unit is turned on first
+ *                               Various minor code refinements
  *
  * 
  */
